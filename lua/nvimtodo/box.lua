@@ -1,4 +1,6 @@
-local function show_box(lines, opts)
+local BOXAPI = {}
+
+function BOXAPI.show_box(lines, opts)
   opts = opts or {}
   local width = opts.width or 60
   local height = opts.height or 15
@@ -24,6 +26,8 @@ local function show_box(lines, opts)
 
   return win
 end
+
+return BOXAPI
 
 -- Usage:
 -- show_box({"line 1", "line 2", "line 3"})
