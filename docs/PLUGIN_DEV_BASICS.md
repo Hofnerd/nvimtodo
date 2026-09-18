@@ -1,787 +1,855 @@
-# Developing a Neovim Plugin: The Basics
+# Developing a Neovim Plugin: A Practical Guide
 
-This document walks through the fundamentals of writing a Neovim plugin, using
-`nvimtodo` — a small todo-list plugin — as the running example. You should
-already be comfortable with Lua and using Vim/Neovim.
+This guide walks through the anatomy of a real Neovim plugin, using **nvimtodo** — a small todo-list plugin — as the running example. Every section shows the pattern you'd use for any plugin; swap the todo-list specifics for your own feature.
 
-By the end you'll have a plugin that:
-
-- installs cleanly via any manager
-- exposes a `:NvimTodo` command
-- shows its todo list in a floating window
-- persists todos to disk as JSON
-- has a one-line test
+The final artifact: `:NvimTodo add`, `:NvimTodo list`, `:NvimTodo done` commands, a buffer-scoped keymap, persisted state in `stdpath('data')`, and a test suite.
 
 ---
 
 ## 1. Plugin Directory Layout
 
-A Neovim plugin is just a directory (usually a git repo) with a few
-conventional subdirectories. Neovim's `:runtimepath` mechanism knows how to
-find code inside these locations, so the layout *is* the discovery protocol.
+Neovim follows a conventional directory layout. A plugin repo looks like this:
 
 ```
 nvimtodo/
-├── plugin/              # Vimscript entry points (auto-sourced at startup)
-│   └── nvimtodo.lua     #   (a .lua file here is sourced as a *script*)
-├── lua/                 # Lua modules, require'd by path
+├── plugin/
+│   └── nvimtodo.lua          # Vimscript/Lua bootstrap (sourced by Neovim at startup)
+├── lua/
 │   └── nvimtodo/
-│       ├── init.lua      #   main module: require('nvimtodo')
-│       ├── state.lua     #   internal module: require('nvimtodo.state')
-│       └── view.lua      #   floating-window rendering
-├── ftdetect/            # filetype detection (ftplugin-style)
-│   └── nvimtodo.vim    #   sets `&filetype` for todo buffers
-├── syntax/              # syntax highlighting for the todo buffer
-│   └── nvimtodo.vim
-├── doc/                 # help files (viewed with :help nvimtodo)
-│   └── nvimtodo.txt
-├── tests/               # plenary.nvim test files
-│   └── test.lua
+│       ├── init.lua           # main module: setup(), public API
+│       ├── state.lua          # internal: persistence, data model
+│       └── window.lua         # internal: UI (dedicated buffer / float)
+├── ftdetect/
+│   └── nvimtodo.vim          # sets filetype for nvimtodo buffers
+├── syntax/
+│   └── nvimtodo.vim          # syntax highlighting for the todo buffer
+├── doc/
+│   └── nvimtodo.txt          # Vimdoc help (generated or hand-written)
+├── tests/
+│   ├── .github/               # CI config (optional)
+│   └── test.lua               # plenary.nvim tests
 ├── .gitignore
-└── README.md
+├── README.md
+└── Makefile                   # optional: test, lint, pack targets
 ```
 
-**Why `plugin/` and `lua/` are special:**
+What goes where:
 
-- **`plugin/`** — Neovim auto-sources every file in `plugin/` on startup
-  (unless `:set nocompatible` or the plugin is disabled). This is the
-  *bootstrap* layer. You typically put a small file here whose only job is
-  to set up lazy-loading and defer the real work to Lua.
-- **`lua/`** — added to `require`'s search path. A file at
-  `lua/nvimtodo/init.lua` is loaded on first `require('nvimtodo')`.
-  Neovim does **not** auto-source this; it's pulled in on demand.
-- **`ftdetect/`** — sourced when a buffer is opened; used to set
-  `&filetype` so syntax and `ftplugin` files apply.
-- **`syntax/`** — loaded when `&filetype` matches the filename.
-- **`doc/`** — help pages. `:help nvimtodo` finds `doc/nvimtodo.txt`.
+| Directory | Purpose |
+|---|---|
+| `plugin/` | **Entry points.** Sourced automatically by Neovim at startup. Keep it tiny — just lazy-load wiring. |
+| `lua/` | Your actual plugin code, organized as Lua modules. `lua/nvimtodo/init.lua` is the module root. |
+| `ftdetect/` | Files that set `&filetype` when a buffer matching a pattern is opened. |
+| `syntax/` | Syntax files that define highlighting rules for your filetype. |
+| `doc/` | Vimdoc-format help (`:help nvimtodo` reads `doc/nvimtodo.txt`). |
+| `tests/` | Test files, typically using `plenary.nvim` or `luacheck`. |
 
-> [!NOTE]
-> You don't need all of these. A minimal plugin is just `lua/<name>/init.lua`
-> and `plugin/<name>.lua`. The rest is added as the plugin grows.
+Two rules of thumb:
+
+1. **`plugin/` is for discovery, not logic.** Everything substantive lives in `lua/`.
+2. **`lua/` mirrors your module namespace.** `lua/nvimtodo/state.lua` is `require('nvimtodo.state')`.
 
 ---
 
 ## 2. Entry Points
 
-How does Neovim find your plugin? There are three common mechanisms:
+Neovim discovers plugins by sourcing files in `plugin/` during startup. For a Lua-first plugin, you want a **lazy-load pattern**: the `plugin/` file registers an `autoload` hook so your Lua code only loads when the user actually uses the plugin.
 
-| Mechanism | How it works |
-|---|---|
-| **`:runtimepath`** | `vim.o.rtp` lists directories; `plugin/` and `lua/` inside each are searched automatically |
-| **`packadd`** | `:packadd nvimtodo` loads a local plugin by name (used in dev/test) |
-| **lazy.nvim / vimpack** | Managers that `:packadd` your repo and manage its lifecycle |
-
-For a user installing `nvimtodo` via lazy.nvim, the config looks like:
-
-```lua
--- lazy.nvim spec
-require('lazy').setup({
-  { 'yourname/nvimtodo',
-    config = function()
-      require('nvimtodo').setup({})
-    end,
-  },
-})
-```
-
-vimpack (Neovim's built-in `:packadd`-based manager) just needs the repo URL:
-
-```vim
-" vimpack config
-packadd nvimtodo
-```
-
-### The two classic entry points
-
-**`plugin/nvimtodo.lua`** — the Vimscript bootstrap. Despite the `.lua`
-extension, this file is *sourced as Vimscript* by Neovim's startup process.
-Its job is to defer everything to Lua:
+### The bootstrap: `plugin/nvimtodo.lua`
 
 ```lua
 -- plugin/nvimtodo.lua
--- This file is sourced as Vimscript by Neovim at startup.
--- It does NOT require the plugin eagerly — it just marks us as loaded.
+-- Sourced by Neovim at startup. Keep this as small as possible.
 
--- Prevent double-loading (standard guard for plugins)
-if g:loaded_nvimtodo == v:false then
-  let g:loaded_nvimtodo = 1
+-- Only load the module on first use (VimEnter or first command).
+vim.api.nvim_create_autocmd('VimEnter', {
+  pattern = '*',
+  callback = function()
+    -- Lazy-load: require() the module only now.
+    require('nvimtodo').setup(vim.g.nvimtodo or {})
+  end,
+  once = true,
+})
 
-  -- Optionally register a lazy-load hook here, e.g. via
-  -- vim.api.nvim_create_autocmd or vim.schedule. The actual
-  -- require('nvimtodo') happens when the user first calls setup().
-end
+-- Register commands lazily so :NvimTodo works even before VimEnter fires
+-- (e.g. in a headless script). The command body defers to the module.
+vim.api.nvim_create_user_command('NvimTodo', function(cmd)
+  require('nvimtodo').handle_command(cmd.fargs, cmd.usages)
+end, {
+  nargs = '+',
+  complete = 'custom:v:lua.require("nvimtodo").complete',
+  subcommands = { 'add', 'list', 'done', 'setup' },
+})
 ```
 
-**`lua/nvimtodo/init.lua`** — the real module. This is what
-`require('nvimtodo')` resolves to. It's only loaded when someone calls
-`require('nvimtodo')` for the first time.
+### The module root: `lua/nvimtodo/init.lua`
 
-> [!TIP]
-> The lazy-loading pattern: `plugin/` does almost nothing (sets a guard,
-> maybe registers an autocmd). The heavy work lives in `lua/` and is pulled
-> in on first `require()`. This keeps startup fast and avoids loading code
-> the user never calls.
-
----
-
-## 3. Defining a Lua Module
-
-The core of the plugin is `lua/nvimtodo/init.lua`. The convention is:
-
-1. Create a local table `M` (or `local M = {}`).
-2. Attach functions to it.
-3. `return M` at the bottom.
+This is the file users `require()`. It exposes `setup()`, the command dispatcher, and any other public API.
 
 ```lua
 -- lua/nvimtodo/init.lua
 local M = {}
 
---- Add a todo item.
----@param text string
-function M.add(text)
-  -- implementation in state.lua
-  local state = require('nvimtodo.state')
-  state.add(text)
-end
-
---- List all todos.
-function M.list()
-  local state = require('nvimtodo.state')
-  return state.all()
-end
-
+-- (full implementation in section 3)
 return M
 ```
 
-**The `require()` convention:**
+### Why two files?
 
-- `require('nvimtodo')` → looks for `lua/nvimtodo/init.lua` on
-  `vim.o.rtp`.
-- `require('nvimtodo.state')` → looks for `lua/nvimtodo/state.lua`.
-- `require('nvimtodo.view')` → looks for `lua/nvimtodo/view.lua`.
+- `plugin/nvimtodo.lua` is **sourced by Neovim** (it's in the `plugin/` directory, which Neovim auto-sources). It's the "wiring" that makes `:NvimTodo` available.
+- `lua/nvimtodo/init.lua` is **required by your code** (and by users). It's the actual implementation.
 
-Neovim's `require` is the standard Lua `require`, but with the runtimepath
-prepended. If a module is required twice, the second call returns the
-cached table — so `M` is a singleton per session.
+The lazy-load pattern means: Neovim sources the tiny bootstrap at startup, but your 500-line module only loads when the user runs `:NvimTodo` or `VimEnter` fires. This keeps startup fast.
 
-**Internal modules** (like `state.lua`) follow the same pattern:
+> [!NOTE]
+> In `lazy.nvim` / `packer.nvim` managed installs, the plugin manager often handles the lazy-load wiring for you. But shipping a `plugin/` bootstrap makes the plugin work with `vimpack` and manual installs too.
+
+---
+
+## 3. Defining a Lua Module
+
+A Neovim Lua module is just a Lua file that returns a table. The convention is:
 
 ```lua
--- lua/nvimtodo/state.lua
+local M = {}
+-- ... functions ...
+return M
+```
+
+### `lua/nvimtodo/init.lua` — the full module
+
+```lua
+-- lua/nvimtodo/init.lua
 local M = {}
 
-local todos = {}
+local defaults = {
+  data_dir = vim.fn.stdpath('data') .. '/nvimtodo',
+  data_file = 'todos.json',
+  open_on_start = false,
+}
 
-function M.add(text)
-  todos[#todos + 1] = { text = text, done = false }
+M.config = {}
+
+---@param opts? table
+function M.setup(opts)
+  M.config = vim.tbl_deep_extend('force', defaults, opts or {})
 end
 
-function M.all()
-  return todos
+---@param text string
+function M.add(text)
+  local state = require('nvimtodo.state')
+  state.add(text)
+  vim.notify('Added: ' .. text)
+end
+
+---@param done boolean
+function M.list(done)
+  local state = require('nvimtodo.state')
+  local todos = state.list(done)
+  local lines = {}
+  for _, t in ipairs(todos) do
+    local mark = t.done and '[x]' or '[ ]'
+    table.insert(lines, string.format('%s %s', mark, t.text))
+  end
+  if #lines == 0 then
+    vim.notify('No todos.')
+    return
+  end
+  -- Show in a dedicated buffer (see section 8)
+  require('nvimtodo.window').show(lines)
+end
+
+---@param index number
+function M.done(index)
+  local state = require('nvimtodo.state')
+  state.mark_done(index)
+  vim.notify('Marked done.')
+end
+
+---@param args string[]
+function M.handle_command(args)
+  local sub = args[1]
+  if sub == 'add' then
+    M.add(table.concat(args, ' ', 2))
+  elseif sub == 'list' then
+    M.list(args[2] == 'done')
+  elseif sub == 'done' then
+    M.done(tonumber(args[2]) or 1)
+  else
+    vim.notify('Unknown subcommand: ' .. tostring(sub))
+  end
+end
+
+---@return string[]
+function M.complete(lead)
+  local subs = { 'add', 'list', 'done', 'setup' }
+  local matches = {}
+  for _, s in ipairs(subs) do
+    if s:sub(1, #lead) == lead then
+      table.insert(matches, s)
+    end
+  end
+  return matches
 end
 
 return M
 ```
+
+### How `require()` works
+
+`require('nvimtodo.state')` searches for `nvimtodo/state.lua` in every directory on `vim.o.rtp` (runtimepath) that contains a `lua/` subdirectory. The dot in the module name maps to a path separator:
+
+```
+require('nvimtodo.state')  →  <rtp>/lua/nvimtodo/state.lua
+require('nvimtodo')        →  <rtp>/lua/nvimtodo/init.lua
+```
+
+The function `require()` returns the table that the file `return`s. Neovim caches modules: after the first `require()`, subsequent calls return the cached table without re-executing the file. This is why `local M = {}` at the top of the file is safe — it runs once.
+
+> [!TIP]
+> Use `local M = {}` even in files that only have internal helpers. It makes the module's public API explicit and keeps the `return M` convention uniform.
 
 ---
 
 ## 4. Configuration
 
-The standard pattern for a configurable plugin:
+The standard pattern for plugin configuration:
 
-1. Define a `defaults` table inside the module.
-2. Expose a `setup()` function that merges user config into defaults.
-3. The user calls `require('nvimtodo').setup({...})` in their init.
+1. Define a `defaults` table with every option and its default value.
+2. In `setup()`, merge user options into defaults with `vim.tbl_deep_extend`.
+3. Store the result on the module for other functions to read.
 
 ```lua
--- lua/nvimtodo/init.lua (continued)
+-- lua/nvimtodo/init.lua (excerpt)
 
 local defaults = {
   data_dir = vim.fn.stdpath('data') .. '/nvimtodo',
-  win_position = 'bottom',   -- 'bottom' | 'top' | 'float'
-  win_width = 60,
-  win_height = 15,
+  data_file = 'todos.json',
+  open_on_start = false,
+  max_items = 100,
 }
 
-local config = nil  -- set by setup()
+M.config = {}
 
---- Configure nvimtodo.
----@param user_config table?
-function M.setup(user_config)
-  -- Merge user config into defaults (shallow merge)
-  config = vim.tbl_deep_extend('force', defaults, user_config or {})
-
-  -- Register user commands (see section 5)
-  M._register_commands()
-
-  -- Fire a User event so other plugins can hook in
-  vim.api.nvim_exec_autocmd('User', {
-    pattern = 'NvimTodoReady',
-    data = { config = config },
-    desc = 'nvimtodo: configuration complete',
-  })
-end
-
---- Get the active config (for internal use).
-function M.get_config()
-  if not config then
-    M.setup({})
-  end
-  return config
+---@param opts? table  User-supplied options.
+function M.setup(opts)
+  -- 'force' overwrites defaults with user values.
+  -- 'keep' would preserve defaults on conflict.
+  M.config = vim.tbl_deep_extend('force', defaults, opts or {})
 end
 ```
 
-The user's init file:
+The user calls it in their `init.lua`:
 
 ```lua
--- user's init.lua
+-- user's ~/.config/nvim/init.lua
 require('nvimtodo').setup({
-  win_position = 'float',
-  win_width = 50,
+  data_file = 'my_todos.json',   -- override the default
+  open_on_start = true,
 })
 ```
 
-> [!NOTE]
-> `vim.tbl_deep_extend('force', defaults, user_config)` does a deep merge:
-> user values override defaults, but missing keys are preserved. Use
-> `'keep'` mode if you want defaults to win on conflict.
+### Why `vim.tbl_deep_extend`?
+
+It recursively merges nested tables. If your defaults have a nested structure:
+
+```lua
+local defaults = {
+  window = {
+    position = 'bottom',
+    height = 10,
+  },
+}
+```
+
+and the user passes `{ window = { position = 'top' } }`, the result is:
+
+```lua
+{ window = { position = 'top', height = 10 } }
+```
+
+`'force'` means user values win on conflict. Use `'keep'` if you want defaults to win.
+
+> [!IMPORTANT]
+> Always call `setup()` with `opts or {}` — if the user calls `require('nvimtodo').setup()` with no argument, `opts` is `nil`, and `vim.tbl_deep_extend` will error on a nil table.
 
 ---
 
 ## 5. User Commands
 
-Register `:NvimTodo` with `vim.api.nvim_create_user_command`. The command
-name is the first argument; the callback receives an `opts` table with
-`opts.args` (the raw string after the command) and `opts.count`.
+Neovim's `vim.api.nvim_create_user_command` registers a `:Command` that the user can type. The key fields:
+
+| Field | Meaning |
+|---|---|
+| `name` | The command name (no `:`). |
+| `command` | A function receiving a `cmd` table with `.fargs` (string args), `.bang`, `.user`, `.nargs`, etc. |
+| `nargs` | `-1` (any), `0` (none), `1` (one), `?` (optional), `+` (one or more). |
+| `subcommands` | Enables `:NvimTodo add` style subcommands. |
+| `complete` | Custom completion function. |
 
 ```lua
--- lua/nvimtodo/init.lua (continued)
-
-local api = vim.api
-
-function M._register_commands()
-  api.nvim_create_user_command('NvimTodo', function(opts)
-    local args = vim.split(opts.args, '%s+', { empty = false })
-    local sub = args[1]
-
-    if sub == 'add' then
-      local text = table.concat(args, ' ', 2)  -- everything after 'add'
-      if text == '' then
-        vim.notify('Usage: :NvimTodo add <text>', vim.log.levels.WARN)
-        return
-      end
-      M.add(text)
-      vim.notify('Added: ' .. text)
-
-    elseif sub == 'list' then
-      local todos = M.list()
-      for i, t in ipairs(todos) do
-        local mark = t.done and '[x]' or '[ ]'
-        print(string.format('%s %s', mark, t.text))
-      end
-
-    elseif sub == 'done' then
-      local state = require('nvimtodo.state')
-      state.mark_done(args[2])  -- mark by index
-      vim.notify('Marked done.')
-
-    else
-      vim.notify('Unknown subcommand: ' .. (sub or ''), vim.log.levels.WARN)
-    end
-  end, {
-    nargs = '*',   -- accepts 0+ args
-    complete = 'custom:v:lua.require("nvimtodo")._complete',
-  })
-end
-
--- Simple completion for subcommands
-function M._complete(arg, line)
-  local subs = { 'add', 'list', 'done' }
-  local matches = {}
-  for _, s in ipairs(subs) do
-    if s:sub(1, #arg) == arg then
-      matches[#matches + 1] = s
-    end
-  end
-  return matches
-end
+-- Registered in plugin/nvimtodo.lua (the bootstrap)
+vim.api.nvim_create_user_command('NvimTodo', function(cmd)
+  require('nvimtodo').handle_command(cmd.fargs, cmd.usages)
+end, {
+  nargs = '+',
+  subcommands = { 'add', 'list', 'done' },
+  complete = 'custom:v:lua.require("nvimtodo").complete',
+})
 ```
 
-Usage:
+This gives the user:
 
-```
-:NvimTodo add Buy milk
+```vim
+:NvimTodo add Buy groceries
 :NvimTodo list
+:NvimTodo list done
 :NvimTodo done 1
 ```
+
+The `cmd.fargs` table contains the raw arguments as strings: `{'add', 'Buy', 'groceries'}`. Your `handle_command` dispatches on the first arg.
+
+> [!TIP]
+> For subcommands, use the `subcommands` field rather than parsing `cmd.fargs[1]` inside the command function. Neovim will auto-complete subcommands and show an error for unknown ones.
 
 ---
 
 ## 6. Keymaps
 
-Use `vim.keymap.set` to bind keys. The first argument is the mode
-(`'n'`, `'i'`, `'v'`, etc.).
+`vim.keymap.set` binds a key to a function or command. The first argument is the **mode**: `'n'` (normal), `'i'` (insert), `'v'` (visual), `'c'` (command-line), or a comma-separated list like `'nv'`.
+
+### Buffer-scoped vs global
 
 ```lua
--- lua/nvimtodo/init.lua (continued)
+-- Global: works in every buffer
+vim.keymap.set('n', '<leader>t', function()
+  vim.cmd('NvimTodo list')
+end, { noremap = true, silent = true, desc = 'Open todo list' })
 
-function M._register_keymaps()
-  -- Global: open the todo list anywhere
-  vim.keymap.set('n', '<leader>t', function()
-    require('nvimtodo.view').toggle()
-  end, { desc = 'Toggle nvimtodo' })
-
-  -- Buffer-local: only active in a nvimtodo buffer
-  -- (set when the todo buffer is opened, see section 8)
-  vim.keymap.set('n', 'd', function()
-    require('nvimtodo.state').mark_done_at_cursor()
-  end, { buffer = 0, desc = 'Mark done' })
-end
+-- Buffer-scoped: only in nvimtodo buffers
+-- (set from within a buffer's autocmd or setup)
+local buf = vim.api.nvim_get_current_buf()
+vim.keymap.set('n', '<leader>a', function()
+  local text = vim.fn.input('Add todo: ')
+  if text ~= '' then
+    vim.cmd('NvimTodo add ' .. vim.fn.shellescape(text))
+  end
+end, { buffer = buf, noremap = true, silent = true, desc = 'Quick-add todo' })
 ```
 
-**Global vs. buffer-scoped:**
+| Option | Effect |
+|---|---|
+| `{ buffer = buf }` | Keymap only active in buffer `buf`. |
+| `{ noremap = true }` | Don't remap if the user already has this key. |
+| `{ silent = true }` | Suppress `:echo` output. |
+| `{ desc = '...' }` | Shown in `:help key-notation` and `:verbose noremap`. |
 
-- `vim.keymap.set('n', 'key', fn)` — global, active in every buffer.
-- `vim.keymap.set('n', 'key', fn, { buffer = 0 })` — buffer-local;
-  `buffer = 0` means "the current buffer" (the one that was current
-  when the keymap was set). Use this for keys that only make sense
-  inside the todo list.
+### When to set buffer-scoped keymaps
 
-> [!TIP]
-> Register buffer-local keymaps *after* you create the buffer (see section
-> 8), so `buffer = 0` refers to the right buffer.
+In a `BufEnter` or `BufRead` autocmd for your filetype:
+
+```lua
+vim.api.nvim_create_autocmd('BufEnter', {
+  pattern = '*.todo',
+  callback = function()
+    local buf = vim.api.nvim_get_current_buf()
+    vim.keymap.set('n', '<CR>', function()
+      -- toggle done in the todo buffer
+    end, { buffer = buf })
+  end,
+})
+```
+
+This ensures the keymap is only created when the user actually opens a todo buffer.
 
 ---
 
 ## 7. Autocommands
 
-Neovim's `vim.api.nvim_create_autocmd` works with both built-in events
-(`BufEnter`, `VimEnter`, `CursorHold`, …) and custom `User` events.
+Neovim's autocommand system lets you react to events. Two directions matter for a plugin:
 
-### (a) Listening for built-in events
+### Listening to built-in events
 
 ```lua
--- lua/nvimtodo/init.lua (continued)
+-- lua/nvimtodo/init.lua
+local State = require('nvimtodo.state')
 
-local api = vim.api
+---@param opts? table
+function M.setup(opts)
+  M.config = vim.tbl_deep_extend('force', defaults, opts or {})
 
-function M._register_autocmds()
-  -- Show a hint on first buffer entry
-  api.nvim_create_autocmd('BufEnter', {
-    pattern = '*.txt',  -- or any pattern
-    callback = function()
-      -- e.g. auto-open todo list on certain filetypes
-    end,
-  })
-
-  -- Save state when the editor is ready
-  api.nvim_create_autocmd('VimEnter', {
-    once = true,
-    callback = function()
-      local state = require('nvimtodo.state')
-      state.load()  -- load from disk
-    end,
-  })
+  if M.config.open_on_start then
+    vim.api.nvim_create_autocmd('VimEnter', {
+      pattern = '*',
+      callback = function()
+        M.list(false)
+      end,
+      once = true,
+    })
+  end
 end
 ```
 
-### (b) Firing custom `User` events
+Common events you'll listen to:
 
-This lets *other* plugins hook into your lifecycle:
+| Event | When it fires |
+|---|---|
+| `VimEnter` | After Neovim has fully started. |
+| `BufEnter` | When a buffer is displayed. |
+| `BufRead` | When a file is read into a buffer. |
+| `TextChanged` | When the buffer content changes. |
+| `CursorHold` | When the cursor is idle (for lazy UI updates). |
+
+### Firing custom `User` events
+
+Plugins should fire `User` events so other plugins (or the user's config) can react:
 
 ```lua
--- Fire when setup() completes (see section 4)
-api.nvim_exec_autocmd('User', {
-  pattern = 'NvimTodoReady',
-  data = { config = config },
-  desc = 'nvimtodo: setup complete',
-})
+-- lua/nvimtodo/init.lua
+local State = require('nvimtodo.state')
 
--- Fire when a todo is added
-api.nvim_exec_autocmd('User', {
-  pattern = 'NvimTodoItemAdded',
-  data = { text = text },
-  desc = 'nvimtodo: item added',
-})
+function M.add(text)
+  State.add(text)
+  -- Fire a User event: :autocmd User NvimTodoAdd
+  vim.cmd('autocmd User NvimTodoAdd')
+end
 ```
 
-Other plugins can then listen:
+The user (or another plugin) can then listen:
 
 ```lua
--- in another plugin
+-- In the user's init.lua
 vim.api.nvim_create_autocmd('User', {
-  pattern = 'NvimTodoItemAdded',
-  callback = function(args)
-    -- args.data.text is the new item
-    print('nvimtodo added: ' .. args.data.text)
+  pattern = 'NvimTodoAdd',
+  callback = function()
+    vim.notify('A todo was added!')
   end,
 })
 ```
 
 > [!NOTE]
-> `nvim_exec_autocmd` (imperative) runs the autocmds *synchronously* and
-> returns. Use it for "fire and forget" lifecycle events. For
-> buffer-scoped events where you want the autocmd to persist, use
-> `nvim_create_autocmd` with `add = true`.
+> `vim.cmd('autocmd User NvimTodoAdd')` is the classic way to fire a User event. In Neovim 0.10+, `vim.api.nvim_exec_autocmd` is the API equivalent:
+>
+> ```lua
+> vim.api.nvim_exec_autocmd('User', 'NvimTodoAdd', {})
+> ```
+>
+> Both work; the `vim.cmd` form is more widely recognized.
 
 ---
 
 ## 8. Text Properties / UI
 
-A todo plugin needs somewhere to show its list. Two common approaches:
+A todo-list plugin needs a place to show the list. Two common approaches:
 
 ### Dedicated buffer
 
-Create a scratch buffer and write the todo list into it:
+Create a scratch buffer with a unique name and set its properties:
 
 ```lua
--- lua/nvimtodo/view.lua
+-- lua/nvimtodo/window.lua
 local M = {}
 
-local buf = nil
-
-function M.open()
-  if buf and vim.api.nvim_buf_is_valid(buf) then
-    vim.api.nvim_set_current_buf(buf)
-    return
+function M.show(lines)
+  -- Reuse an existing nvimtodo buffer if one is open
+  local buf = M._buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    buf = vim.api.nvim_create_buf({
+      listed = false,       -- won't appear in :ls
+      buftype = 'nofile',   -- not backed by a file
+      bufhidden = 'wipe',   -- delete when hidden
+      modifiable = true,
+    })
+    M._buf = buf
   end
 
-  buf = vim.api.nvim_create_buf(false, true)  -- scratch, not listed
-  vim.api.nvim_buf_set_name(buf, '[nvimtodo]')
-  vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
-  vim.api.nvim_buf_set_option(buf, 'filetype', 'nvimtodo')
-
-  -- Render initial content
-  M.render()
-
-  -- Set up buffer-local keymaps (see section 6)
-  vim.api.nvim_set_current_buf(buf)
-  local state = require('nvimtodo.state')
-  vim.keymap.set('n', 'd', function()
-    state.mark_done_at_cursor()
-    M.render()
-  end, { buffer = buf })
-end
-
-function M.render()
-  if not buf then return end
-  local todos = require('nvimtodo.state').all()
-  local lines = {}
-  for i, t in ipairs(todos) do
-    local mark = t.done and '[x]' or '[ ]'
-    lines[#lines + 1] = string.format('%d. %s %s', i, mark, t.text)
-  end
-  if #lines == 0 then
-    lines[1] = '(no todos)'
-  end
+  -- Set the lines
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  -- Set filetype and syntax
+  vim.api.nvim_buf_set_name(buf, '[NvimTodo]')
+  vim.bo[buf].filetype = 'nvimtodo'
+
+  -- Show it in a vertical split
+  local win = vim.api.nvim_open_win(buf, false, {
+    split = 'vertical',
+    relative = 'editor',
+  })
+
+  vim.api.nvim_set_current_win(win)
 end
 
 return M
 ```
 
-### Floating window
+The `ftdetect/nvimtodo.vim` file then sets the filetype:
 
-For a non-intrusive overlay:
-
-```lua
--- lua/nvimtodo/view.lua (continued)
-
-function M.toggle_float()
-  local win = vim.api.nvim_open_win(0, false, {
-    relative = 'editor',
-    border = 'single',
-    style = 'float',
-    width = 60,
-    height = 15,
-    row = 2,
-    col = 2,
-  })
-  vim.api.nvim_set_current_win(win)
-  -- Write content into the float window's buffer
-  local todos = require('nvimtodo.state').all()
-  local lines = {}
-  for i, t in ipairs(todos) do
-    local mark = t.done and '[x]' or '[ ]'
-    lines[#lines + 1] = string.format('%d. %s %s', i, mark, t.text)
-  end
-  vim.api.nvim_win_set_text(win, lines)
-end
+```vim
+" ftdetect/nvimtodo.vim
+if expand('%:t') == '[NvimTodo]'
+  setf nvimtodo
+endif
 ```
 
-> [!TIP]
-> A dedicated buffer is simpler and integrates with `:b`, `:bd`, and
-> window management. A floating window is better for a quick-glance
-> overlay. Many todo plugins offer both — a `:NvimTodo` command opens
-> the buffer, `<leader>t` toggles the float.
+And `syntax/nvimtodo.vim` provides highlighting:
+
+```vim
+" syntax/nvimtodo.vim
+syn match TodoDone     '^\[x\]'
+syn match TodoPending '^\[ \]'
+syn match TodoText     '^\[.\] .*'
+hi link TodoDone     Comment
+hi link TodoPending  Special
+hi link TodoText     Normal
+```
+
+### Floating window
+
+For a more transient UI (e.g. a quick-add popup), use `nvim_open_win`:
+
+```lua
+local rows = vim.o.lines
+local cols = vim.o.columns
+
+local win = vim.api.nvim_open_win(vim.api.nvim_create_buf({
+  bufhidden = 'wipe',
+}), false, {
+  relative = 'editor',
+  border = 'singleline',
+  width = math.floor(cols * 0.5),
+  height = math.floor(rows * 0.4),
+  row = math.floor(rows * 0.3),
+  col = math.floor(cols * 0.25),
+})
+
+-- Use insert mode for quick input
+vim.cmd('startinsert')
+```
+
+Choose **dedicated buffer** for a persistent todo list; **floating window** for transient popups.
 
 ---
 
 ## 9. State Persistence
 
-Store todos as JSON in the user's data directory:
+Store data under `vim.fn.stdpath('data')` — this is the per-user data directory (e.g. `~/.local/share/nvim` on Linux, `~/Library/Application Support/nvim` on macOS).
 
 ```lua
--- lua/nvimtodo/state.lua (continued)
-
+-- lua/nvimtodo/state.lua
 local M = {}
 
-local DATA_DIR = nil
-local todos = {}
+local data_dir
+local data_file
 
-local function _data_path()
-  if not DATA_DIR then
-    DATA_DIR = vim.fn.stdpath('data') .. '/nvimtodo'
-    vim.fn.mkdir(DATA_DIR, 'p')  -- create dirs recursively
-  end
-  return DATA_DIR .. '/todos.json'
-end
-
---- Load todos from disk.
-function M.load()
-  local path = _data_path()
-  if vim.fn.filereadable(path) == 1 then
-    local ok, data = pcall(vim.fn.jsondecode, vim.fn.readfile(path)[1])
-    if ok and type(data) == 'table' then
-      todos = data
-    end
+local function ensure_dir()
+  if not vim.fn.isdirectory(data_dir) then
+    vim.fn.mkdir(data_dir, 'p')  -- recursive
   end
 end
 
---- Save todos to disk.
-function M.save()
-  local path = _data_path()
-  vim.fn.writefile({ vim.fn.jsonencode(todos) }, path)
+local function load()
+  if vim.fn.filereadable(data_file) == 0 then
+    return {}
+  end
+  local f = assert(io.open(data_file, 'r'))
+  local content = f:read('a')
+  f:close()
+  if content == '' then
+    return {}
+  end
+  return vim.json.decode(content)
+end
+
+local function save(todos)
+  ensure_dir()
+  local f = assert(io.open(data_file, 'w'))
+  f:write(vim.json.encode(todos))
+  f:close()
+end
+
+function M.init(config)
+  data_dir = config.data_dir
+  data_file = config.data_dir .. '/' .. config.data_file
 end
 
 function M.add(text)
-  todos[#todos + 1] = { text = text, done = false }
-  M.save()
+  local todos = load()
+  table.insert(todos, { text = text, done = false, created = os.date('%Y-%m-%dT%H:%M:%S') })
+  save(todos)
 end
 
-function M.all()
-  return todos
+function M.list(only_done)
+  local todos = load()
+  if not only_done then
+    return todos
+  end
+  local out = {}
+  for _, t in ipairs(todos) do
+    if t.done then table.insert(out, t) end
+  end
+  return out
 end
 
-function M.mark_done_at_cursor()
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local idx = line  -- 1-based line number == 1-based index
-  if todos[idx] then
-    todos[idx].done = true
-    M.save()
+function M.mark_done(index)
+  local todos = load()
+  if todos[index] then
+    todos[index].done = true
+    save(todos)
   end
 end
 
 return M
 ```
 
-> [!NOTE]
-> `vim.fn.jsonencode` / `vim.fn.jsondecode` are the built-in JSON
-> functions. For more complex needs, `lspkind` or a dedicated JSON
-> library works too, but for a todo list the built-ins are sufficient.
+The JSON file looks like:
+
+```json
+[
+  { "text": "Buy groceries", "done": false, "created": "2025-06-01T10:30:00" },
+  { "text": "Ship report",   "done": true,  "created": "2025-06-01T09:00:00" }
+]
+```
+
+> [!IMPORTANT]
+> Use `io.open` / `io.write` for file I/O, not `vim.fn.writefile` — the latter writes a *list of lines* and mangles JSON. `vim.json.encode` / `vim.json.decode` handle the serialization.
 
 ---
 
 ## 10. Testing
 
-Use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) for tests.
+Use **`plenary.nvim`** (a test framework) and **`plenary.nvim`'s `nvim` test runner**. Install it as a dev dependency:
+
+```lua
+-- .github/workflows/test.yml (or a Makefile target)
+-- plenary.nvim is a dev-only dependency, not a runtime dep.
+```
+
+In your `lazy.json` / `lazy-lock.json`:
+
+```lua
+-- dev dependencies (in lazy.nvim config)
+{ 'luapeople/plenary.nvim',      tag = 'v0.1.6' },
+{ 'nvim-lua/plenary.nvim',       tag = 'v0.1.6' },
+```
+
 A minimal test file:
 
 ```lua
 -- tests/test.lua
-local nvimtodo = require('nvimtodo')
+local assert = require('luassert')  -- bundled with plenary
+local pending = require('plenary.test')
 
-describe('nvimtodo', function()
-  before_each(function()
-    -- Reset state between tests
-    require('nvimtodo.state').clear()
-  end)
+pending.test('nvimtodo.add', function()
+  -- Arrange
+  require('nvimtodo').setup({
+    data_dir = vim.fn.tempname(),
+    data_file = 'test.json',
+  })
+  require('nvimtodo.state').init(require('nvimtodo').config)
 
-  it('adds a todo', function()
-    nvimtodo.add('test item')
-    local todos = nvimtodo.list()
-    assert.equal(1, #todos)
-    assert.equal('test item', todos[1].text)
-    assert.is_false(todos[1].done)
-  end)
+  -- Act
+  require('nvimtodo').add('Test todo')
 
-  it('persists to disk', function()
-    nvimtodo.add('persisted')
-    local state = require('nvimtodo.state')
-    state.save()
-    state.load()
-    assert.equal(1, #state.all())
-  end)
+  -- Assert
+  local todos = require('nvimtodo.state').list(false)
+  assert.equals(1, #todos)
+  assert.equals('Test todo', todos[1].text)
+  assert.falsy(todos[1].done)
+end)
+
+pending.test('nvimtodo.mark_done', function()
+  require('nvimtodo').setup({
+    data_dir = vim.fn.tempname(),
+    data_file = 'test.json',
+  })
+  require('nvimtodo.state').init(require('nvimtodo').config)
+  require('nvimtodo').add('To be done')
+
+  require('nvimtodo').done(1)
+
+  local todos = require('nvimtodo.state').list(false)
+  assert.truthy(todos[1].done)
 end)
 ```
 
 Run with:
 
-```sh
-nvim --headless -c "PlenaryBustedDirectory tests/ ./tests/" -c "qa!"
+```bash
+# From the repo root
+nvim --headless -c "PlenaryBustedFile tests/test.lua" -c "qa!"
 ```
 
-Or via `:PlenaryBustedFile tests/test.lua` in an interactive session.
+Or in CI:
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nvimdev/neotest-github-action@v1
+        with:
+          nvim-version: 'latest'
+          test-command: |
+            nvim --headless -c "PlenaryBustedFile tests/test.lua" -c "qa!"
+```
+
+> [!TIP]
+> Use `vim.fn.tempname()` in tests so each test run gets a fresh data directory. Never let tests write to the user's real `stdpath('data')`.
 
 ---
 
 ## 11. Packaging / Distribution
-
-To make the plugin installable, you need:
 
 ### `.gitignore`
 
 ```gitignore
 # Test artifacts
 tests/.plenary/
-tests/.plenary_home/
-
-# OS/editor noise
-.DS_Store
 *.swp
-*~
+*.swo
+
+# Build artifacts (if you use make/lua)
+lua/*.luajit
+*.o
+*.so
+
+# IDE
+.vscode/
+.idea/
 ```
 
-### `README.md`
+### `README.md` — minimal
 
-A minimal README with install instructions:
-
-````markdown
+```markdown
 # nvimtodo
 
-A todo-list plugin for Neovim.
+A minimal todo-list plugin for Neovim.
 
-## Install
+## Requirements
+
+- Neovim >= 0.10
+
+## Installation
 
 ### lazy.nvim
 
 ```lua
-require('lazy').setup({
-  { 'yourname/nvimtodo',
-    config = function()
-      require('nvimtodo').setup({})
-    end,
+{ 'yourname/nvimtodo',
+  config = true,          -- auto-calls setup()
+  opts = {
+    open_on_start = true,
   },
-})
+}
 ```
 
-### vimpack
+### vimpack (manual)
 
-```vim
-packadd nvimtodo
+```bash
+git clone https://github.com/yourname/nvimtodo.git \
+  ~/.local/share/nvim/site/pack/plugins/start/nvimtodo
 ```
 
 ## Usage
 
-```
-:NvimTodo add Buy milk
+```vim
+:NvimTodo add Buy groceries
 :NvimTodo list
+:NvimTodo list done
 :NvimTodo done 1
+```
+
+## Configuration
+
+```lua
+require('nvimtodo').setup({
+  data_file = 'todos.json',
+  open_on_start = false,
+})
 ```
 
 ## Keymaps
 
 | Key | Action |
 |---|---|
-| `<leader>t` | Toggle todo list |
-| `d` (in todo buffer) | Mark done |
-````
+| `<leader>t` | Open todo list |
 
-### Manager notes
+## License
 
-- **lazy.nvim** — just needs the repo URL (`'yourname/nvimtodo'`). It
-  `:packadd`s the repo, runs your `config` function, and you're done.
-- **vimpack** — `:packadd nvimtodo` loads by name; no config function
-  needed (your `setup()` is called by the user in their init).
-- **`:runtimepath`** — users can add `~/dev/nvimtodo` to `vim.o.rtp`
-  for development. Your `plugin/` and `lua/` directories are picked up
-  automatically.
+MIT
+```
 
-> [!TIP]
-> Tag releases (`git tag v0.1.0`) so managers can pin versions. Most
-> managers default to the latest tag or `HEAD` if no tags exist.
+### `lazy.nvim` install
+
+Users who use `lazy.nvim` add to their `lazy-lock.json` or `init.lua`:
+
+```lua
+-- ~/.config/nvim/lazy-lock.json (managed by lazy.nvim)
+{
+  "nvimtodo": { "commit": "abc1234" }
+}
+```
+
+Or in `init.lua`:
+
+```lua
+require('lazy').setup({
+  { 'yourname/nvimtodo',
+    config = true,       -- calls require('nvimtodo').setup() with opts below
+    opts = {
+      open_on_start = true,
+    },
+  },
+})
+```
+
+`lazy.nvim` will clone the repo, and because `plugin/nvimtodo.lua` exists, the bootstrap is sourced. The `config = true` flag tells lazy.nvim to call `setup()` with the `opts` table.
+
+### `vimpack` (manual) install
+
+```bash
+# Install to a pack path
+git clone https://github.com/yourname/nvimtodo.git \
+  ~/.local/share/nvim/site/pack/plugins/start/nvimtodo
+
+# Neovim auto-detects it at startup (plugin/ is in the rtp)
+```
+
+No `:packadd` needed — Neovim's `pack` option auto-loads from `~/.local/share/nvim/site/pack/`.
+
+### Tagging a release
+
+```bash
+git tag -a v0.1.0 -m "Initial release"
+git push --tags
+```
+
+Users pin to a tag in their `lazy-lock.json`:
+
+```json
+{ "nvimtodo": { "commit": "abc1234" } }
+```
+
+or use the `branch = 'main'` / `tag = 'v0.1.0'` fields in their lazy.nvim spec.
 
 ---
 
-## Putting It All Together
+## Summary
 
-The full `init.lua` for `nvimtodo`:
+| Concern | Where | Key API |
+|---|---|---|
+| Discovery | `plugin/nvimtodo.lua` | Auto-sourced by Neovim |
+| Module | `lua/nvimtodo/init.lua` | `require('nvimtodo')` |
+| Config | `M.setup()` | `vim.tbl_deep_extend` |
+| Commands | `:NvimTodo` | `nvim_create_user_command` |
+| Keymaps | `<leader>t` | `vim.keymap.set` |
+| Events | `VimEnter`, `User` | `nvim_create_autocmd`, `nvim_exec_autocmd` |
+| UI | Scratch buffer or float | `nvim_create_buf`, `nvim_open_win` |
+| State | `stdpath('data')/nvimtodo/` | `io.open` + `vim.json.encode/decode` |
+| Tests | `tests/test.lua` | `plenary.nvim` |
+| Distribution | Git repo + tag | `lazy.nvim` / `vimpack` |
 
-```lua
--- lua/nvimtodo/init.lua
-local M = {}
-
-local defaults = {
-  data_dir = vim.fn.stdpath('data') .. '/nvimtodo',
-  win_position = 'bottom',
-  win_width = 60,
-  win_height = 15,
-}
-
-local config = nil
-
-function M.setup(user_config)
-  config = vim.tbl_deep_extend('force', defaults, user_config or {})
-  M._register_commands()
-  M._register_keymaps()
-  M._register_autocmds()
-
-  vim.api.nvim_exec_autocmd('User', {
-    pattern = 'NvimTodoReady',
-    data = { config = config },
-    desc = 'nvimtodo: setup complete',
-  })
-end
-
-function M.add(text)
-  require('nvimtodo.state').add(text)
-end
-
-function M.list()
-  return require('nvimtodo.state').all()
-end
-
-function M.get_config()
-  if not config then M.setup({}) end
-  return config
-end
-
-function M._register_commands()
-  vim.api.nvim_create_user_command('NvimTodo', function(opts)
-    local args = vim.split(opts.args, '%s+', { empty = false })
-    local sub = args[1]
-    if sub == 'add' then
-      M.add(table.concat(args, ' ', 2))
-    elseif sub == 'list' then
-      for i, t in ipairs(M.list()) do
-        print(string.format('%s %s', t.done and '[x]' or '[ ]', t.text))
-      end
-    elseif sub == 'done' then
-      require('nvimtodo.state').mark_done_at_cursor()
-    end
-  end, { nargs = '*' })
-end
-
-function M._register_keymaps()
-  vim.keymap.set('n', '<leader>t', function()
-    require('nvimtodo.view').open()
-  end, { desc = 'Toggle nvimtodo' })
-end
-
-function M._register_autocmds()
-  vim.api.nvim_create_autocmd('VimEnter', {
-    once = true,
-    callback = function()
-      require('nvimtodo.state').load()
-    end,
-  })
-end
-
-return M
-```
-
-That's the whole plugin. Every section above maps to a real file in the
-tree. Add features (editing, filtering, multiple lists) by extending
-`state.lua` and `view.lua` — the entry points, config, and command
-registration stay the same.
+The pattern is the same for any plugin: a tiny `plugin/` bootstrap for discovery, a `lua/` module tree for logic, `setup()` for configuration, and standard Neovim APIs for commands, keymaps, events, buffers, and persistence. Swap the todo-list specifics for your own feature and the skeleton holds.
