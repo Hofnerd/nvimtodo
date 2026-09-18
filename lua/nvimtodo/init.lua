@@ -2,9 +2,9 @@ local M = {}
 
 require('nvimtodo.box')
 
--- vim.notify("test123", vim.log.levels.INFO)
-print("My plugin is loaded")
-
-
+function M.setup(opts)
+  print("My plugin is loaded")
+  print(opts)
+end
 
 return M
