@@ -1,5 +1,20 @@
 local BOXAPI = {}
 
+-- local resize_timer = nil
+--
+-- local function on_resize(win)
+--   if resize_timer then
+--     resize_timer:stop()
+--   else
+--   end
+--   resize_timer = vim.uv.new_timer()
+--   resize_timer:start(50, 0, function()
+--     resize_timer:stop()
+--     resize_timer:close()
+--
+--   end)
+-- end
+
 function BOXAPI.show_box(lines, opts)
   opts = opts or {}
 
@@ -30,8 +45,14 @@ function BOXAPI.show_box(lines, opts)
   vim.api.nvim_win_set_option(win, 'winhighlight', 'Normal:Normal,FloatBorder:Normal')
   vim.api.nvim_command('setlocal ft=markdown')
 
+  --   local winresize = vim.api.nvim_create_autocmd("WinResized", {
+  --     pattern = "*",
+  --     callback = on_resize(win),
+  --   })
+
   -- Close with <Esc>
   vim.keymap.set("n", "<Esc>", function()
+    --    vim.api.nvim_del_autocmd(winresize)
     vim.api.nvim_win_close(win, true)
   end, { buffer = buf })
 
