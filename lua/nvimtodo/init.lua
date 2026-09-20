@@ -27,7 +27,10 @@ function M.setup(opts)
     if file then
       content = file:read("*a")
     end
-    table.insert(strs, content)
+    local lines = vim.fn.split(content, "\n")
+    for _, value in ipairs(lines) do
+      table.insert(strs, value)
+    end
   else
     local file = io.open(gfile, "w")
     if file then
