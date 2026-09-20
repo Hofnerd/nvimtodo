@@ -17,29 +17,24 @@ function M.setup(opts)
   gfile = opts.global_fn or vim.fn.join({ data_dir, "todo.md" }, '/')
   lfile = opts.local_fn or vim.fn.join({ proj_root, "todo.md" }, '/')
 
-  local strs = {}
+  local strs = { gfile, lfile }
 
-  local stat, err = vim.loop.fs_stat(gfile)
-  if type(stat) == "string" then
-    table.insert(strs, stat)
+  local stat, _ = vim.loop.fs_stat(gfile)
+  local io = require("io")
+  if stat then
+    local file = io.open(gfile, "r")
+    local content = ""
+    if file then
+      content = file:read("*a")
+    end
+    table.insert(strs, content)
   else
-    table.insert(strs, err)
+    local file = io.open(gfile, "w")
+    if file then
+      file:write("-- new TODO file")
+      file:close()
+    end
   end
-
-  stat, err = vim.loop.fs_stat(lfile)
-  if type(stat) == "string" then
-    table.insert(strs, stat)
-  else
-    table.insert(strs, err)
-  end
-
-
-  table.insert(strs, "Test123")
-  table.insert(strs, "test123")
-  table.insert(strs, "- [ ] test123")
-  table.insert(strs, gfile)
-  table.insert(strs, lfile)
-
   box.show_box(strs, {})
 end
 
