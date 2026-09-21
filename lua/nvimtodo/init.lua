@@ -8,7 +8,6 @@ local gfile = ""
 local lfile = ""
 M.todolist = { global_todos = {}, local_todos = {} }
 
-
 local function process_rawfile(content)
   local ret = {}
   local lines = vim.fn.split(content, "\n")
@@ -18,6 +17,36 @@ local function process_rawfile(content)
     end
   end
   return ret
+end
+
+function M.AddGlobalTodo(todo)
+  local str = vim.fn.join({ "- [ ] ", todo }, "")
+  table.insert(M.todolist.global_todos, str)
+end
+
+function M.AddLocalTodo(todo)
+  local str = vim.fn.join({ "- [ ] ", todo }, "")
+  table.insert(M.todolist.local_todos, str)
+end
+
+function M.SaveGlobalTodos()
+  local content = vim.fn.join(M.todolist.global_todos, "\n")
+  local io = require("io")
+  local file = io.open(gfile, "w")
+  if file then
+    file:write(content)
+    file:close()
+  end
+end
+
+function M.SaveLocalTodos()
+  local content = vim.fn.join(M.todolist.local_todos, "\n")
+  local io = require("io")
+  local file = io.open(lfile, "w")
+  if file then
+    file:write(content)
+    file:close()
+  end
 end
 
 function M.DisplayLists()
@@ -103,6 +132,8 @@ function M.setup(opts)
     end
   end
 
+
+  -- Setup user commands
   vim.api.nvim_create_user_command("TodoDisplayLists", function(_)
     M.DisplayLists()
   end, {
@@ -133,6 +164,31 @@ function M.setup(opts)
     range = false,
     nargs = 0,
     desc = "Show Local TODO list"
+  })
+
+  vim.api.nvim_create_user_command("TodoSaveTodoLists", function(_)
+    M.SaveLocalTodos()
+    M.SaveGlobalTodos()
+  end, {
+    range = false,
+    nargs = 0,
+    desc = "Save both Global and local TODO lists"
+  })
+
+  vim.api.nvim_create_user_command("TodoSaveGlobal", function(_)
+    M.SaveGlobalTodos()
+  end, {
+    range = false,
+    nargs = 0,
+    desc = "Save Global TODO list"
+  })
+
+  vim.api.nvim_create_user_command("TodoSaveLocal", function(_)
+    M.SaveLocalTodos()
+  end, {
+    range = false,
+    nargs = 0,
+    desc = "Save Local TODO list"
   })
 end
 
