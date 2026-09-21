@@ -99,7 +99,6 @@ function M.setup(opts)
     end
   end
 
-
   vim.api.nvim_create_user_command("TodoDisplayLists", function(_)
     M.DisplayLists()
   end, {

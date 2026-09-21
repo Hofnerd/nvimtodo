@@ -28,7 +28,6 @@ function BOXAPI.show_box(lines, opts)
   })
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines or { "Hello!" })
-  vim.api.nvim_buf_set_name(buf, "temp.md")
 
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
