@@ -20,13 +20,17 @@ local function process_rawfile(content)
 end
 
 function M.AddGlobalTodo(todo)
-  local str = vim.fn.join({ "- [ ] ", todo }, "")
-  table.insert(M.todolist.global_todos, str)
+  for _, value in ipairs(todo) do
+    local str = vim.fn.join({ "- [ ] ", value }, "")
+    table.insert(M.todolist.global_todos, str)
+  end
 end
 
 function M.AddLocalTodo(todo)
-  local str = vim.fn.join({ "- [ ] ", todo }, "")
-  table.insert(M.todolist.local_todos, str)
+  for _, value in ipairs(todo) do
+    local str = vim.fn.join({ "- [ ] ", value }, "")
+    table.insert(M.todolist.local_todos, str)
+  end
 end
 
 function M.SaveGlobalTodos()
@@ -189,6 +193,22 @@ function M.setup(opts)
     range = false,
     nargs = 0,
     desc = "Save Local TODO list"
+  })
+
+  vim.api.nvim_create_user_command("TodoAddLocal", function(args)
+    M.AddGlobalTodo(args)
+  end, {
+    range = false,
+    nargs = "*",
+    desc = "Add list of todos to Global TODO list"
+  })
+
+  vim.api.nvim_create_user_command("TodoAddLocal", function(args)
+    M.AddLocalTodo(args)
+  end, {
+    range = false,
+    nargs = "*",
+    desc = "Add list of todos to the Local TODO list"
   })
 end
 
