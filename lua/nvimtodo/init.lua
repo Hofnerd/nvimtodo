@@ -42,6 +42,10 @@ function M.DisplayLocalList()
   box.show_box(list, {})
 end
 
+function M.DisplayProjectTodos()
+  -- figure out how i want to display project todos
+end
+
 -- Setup function
 function M.setup(opts)
   local io = require("io")
@@ -117,6 +121,14 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command("TodoDisplayLocal", function(_)
     M.DisplayLocalList()
+  end, {
+    range = false,
+    nargs = 0,
+    desc = "Show Local TODO list"
+  })
+
+  vim.api.nvim_create_user_command("TodoDisplayProject", function(_)
+    M.DisplayProjectTodos()
   end, {
     range = false,
     nargs = 0,
