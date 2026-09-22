@@ -141,32 +141,24 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("TodoDisplayLists", function(_)
     M.DisplayLists()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Show both Global and Local TODO lists"
   })
 
   vim.api.nvim_create_user_command("TodoDisplayGlobal", function(_)
     M.DisplayGlobalList()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Show Global TODO list"
   })
 
   vim.api.nvim_create_user_command("TodoDisplayLocal", function(_)
     M.DisplayLocalList()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Show Local TODO list"
   })
 
   vim.api.nvim_create_user_command("TodoDisplayProject", function(_)
     M.DisplayProjectTodos()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Show Local TODO list"
   })
 
@@ -174,31 +166,24 @@ function M.setup(opts)
     M.SaveLocalTodos()
     M.SaveGlobalTodos()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Save both Global and local TODO lists"
   })
 
   vim.api.nvim_create_user_command("TodoSaveGlobal", function(_)
     M.SaveGlobalTodos()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Save Global TODO list"
   })
 
   vim.api.nvim_create_user_command("TodoSaveLocal", function(_)
     M.SaveLocalTodos()
   end, {
-    range = false,
-    nargs = 0,
     desc = "Save Local TODO list"
   })
 
   vim.api.nvim_create_user_command("TodoAddLocal", function(args)
     M.AddGlobalTodo(args)
   end, {
-    range = false,
     nargs = "*",
     desc = "Add list of todos to Global TODO list"
   })
@@ -206,7 +191,6 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("TodoAddLocal", function(args)
     M.AddLocalTodo(args)
   end, {
-    range = false,
     nargs = "*",
     desc = "Add list of todos to the Local TODO list"
   })
